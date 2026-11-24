@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Monitoreo de estufa</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0b1120;--card:#121a2b;--b:#263247;--t1:#e2e8f0;--t2:#94a3b8;--line:#3987e5;--banda:rgba(16,185,129,.13);--sp:#10b981}
+body{font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--t1);min-height:100vh}
+.app{max-width:1000px;margin:0 auto;padding:24px 18px}
+header{display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;align-items:center;margin-bottom:18px}
+h1{font-size:1.25rem;font-weight:600}
+.estado{font-size:.85rem;color:var(--t2)}
+.fila{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px;font-size:.85rem;color:var(--t2)}
+button,input,select{font:inherit;color:var(--t1);background:var(--card);border:1px solid var(--b);border-radius:8px;padding:7px 11px}
+button{cursor:pointer}button:hover,button.on{border-color:var(--t2)}button.on{background:#22304a}
+.fila input{width:74px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--b);border-radius:14px;padding:14px}
+.k{font-size:.75rem;color:var(--t2)}.v{font-size:1.45rem;font-weight:600;margin-top:3px}
+.tiles .p{font-size:2rem}
+#graf{position:relative;margin-bottom:14px}
+#graf h2{font-size:.9rem;font-weight:500;margin-bottom:8px}
+svg{display:block;width:100%;height:380px;touch-action:pan-y}
+#tip{position:absolute;display:none;pointer-events:none;background:#1c2740;border:1px solid var(--b);border-radius:8px;padding:6px 9px;font-size:.8rem;white-space:nowrap}
+table{width:100%;border-collapse:collapse;font-size:.85rem;margin-top:10px;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:5px;border-bottom:1px solid var(--b)}th:first-child,td:first-child{text-align:left}
+summary{cursor:pointer}
+#cfg{position:fixed;inset:0;background:rgba(5,9,18,.85);display:none;align-items:center;justify-content:center;padding:18px;z-index:5}
+#cfg form{width:100%;max-width:380px;display:grid;gap:9px}
+#cfg label{font-size:.8rem;color:var(--t2);display:grid;gap:4px}
+#demo{color:#f59e0b}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Monitoreo de estufa <span id="demo" hidden>— DATOS SIMULADOS</span></h1>
+    <div class="estado"><span id="con">Sin conectar</span> · <span id="esp">ESP32: —</span> <button id="bcfg" title="Configurar MQTT" aria-label="Configurar MQTT">&#9881;</button></div>
+  </header>
+  <div class="fila">
+    <label>Ensayo <select id="ens"></select></label>
+    <span id="rangos"><button data-h="0" class="on">Todo</button> <button data-h="12">12 h</button> <button data-h="3">3 h</button> <button data-h="1">1 h</button></span>
+    <label>Setpoint <input id="sp" type="number" step="0.1"> °C</label>
+    <label>± <input id="tol" type="number" step="0.1" min="0"> °C</label>
+    <button id="csv">Descargar CSV</button>
+  </div>
+  <div class="tiles">
+    <div class="card"><div class="k">Última lectura</div><div class="v p" id="act">—</div><div class="k" id="hora"></div></div>
+    <div class="card"><div class="k">Mínima del rango</div><div class="v" id="min">—</div></div>
+    <div class="card"><div class="k">Máxima del rango</div><div class="v" id="max">—</div></div>
+    <div class="card"><div class="k">Media del rango</div><div class="v" id="med">—</div></div>
+    <div class="card"><div class="k">Dentro de tolerancia</div><div class="v" id="den">—</div></div>
+  </div>
+  <div class="card" id="graf"><h2>Temperatura (°C) — franja verde: setpoint ± tolerancia</h2><svg id="svg" role="img" aria-label="Temperatura en el tiempo"></svg><div id="tip"></div></div>
+  <details class="card"><summary>Resumen por hora</summary><table><thead><tr><th>Hora</th><th>Mín.</th><th>Media</th><th>Máx.</th><th>Lecturas</th></tr></thead><tbody id="tb"></tbody></table></details>
+</div>
+<div id="cfg"><form class="card" autocomplete="off">
+  <h2>Conexión a HiveMQ</h2>
+  <p class="k">Se guarda solo en este navegador.</p>
+  <label>Host <input id="chost" placeholder="abc123.s1.eu.hivemq.cloud" required></label>
+  <label>Puerto WSS <input id="cport" type="number" value="8884" required></label>
+  <label>Usuario <input id="cuser" required></label>
+  <label>Contraseña <input id="cpass" type="password" required></label>
+  <button type="submit">Conectar</button> <button type="button" id="ccanc">Cancelar</button>
+</form></div>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+(function(){
+'use strict';
+var $=function(i){return document.getElementById(i)};
+var KEY='estufa_mqtt_cfg',OPT='estufa_opciones';
+var lee=function(k){try{return JSON.parse(localStorage.getItem(k))}catch(e){return null}};
+var ensayos=new Map(),elegido='',horas=0,cliente=null,pts=[],vis=[],esc=null,pend=false;
+var opt=lee(OPT)||{sp:37,tol:1};
+$('sp').value=opt.sp;$('tol').value=opt.tol;
+
+// ---- Datos: cada ensayo es un mapa epoch -> temperatura (o null) ----
+function ens(id,n){
+  if(!ensayos.has(id))ensayos.set(id,{id:id,n:n,d:new Map(),bloques:new Map(),ult:0});
+  return ensayos.get(id);
+}
+function bloque(m){
+  if(!m||typeof m.id!=='string'||!Array.isArray(m.t)||!(m.epoch0>0)||!(m.p>0))return;
+  ens(m.id,+m.ensayo).bloques.set(+m.bloque,{e:+m.epoch0,p:+m.p,t:m.t});
+  pedir();
+}
+function vivo(m){
+  if(!m||typeof m.id!=='string'||!(m.epoch>0))return;
+  ens(m.id,+m.ensayo).d.set(+m.epoch,typeof m.t==='number'?m.t:null);
+  pedir();
+}
+function puntos(e){
+  var r=[],fin=0;
+  Array.from(e.bloques.keys()).sort(function(a,b){return a-b}).forEach(function(k){
+    var b=e.bloques.get(k);
+    b.t.forEach(function(v,i){r.push([b.e+i*b.p,typeof v==='number'?v/100:null])});
+    fin=Math.max(fin,b.e+b.t.length*b.p);
+  });
+  // Lecturas en vivo que el último bloque todavía no incluye
+  e.d.forEach(function(v,t){if(t>=fin-2)r.push([t,v])});
+  r.sort(function(a,b){return a[0]-b[0]});
+  return r;
+}
+function pedir(){if(!pend){pend=true;setTimeout(function(){pend=false;dibujar()},200)}}
+
+var f2=function(v){return v.toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})};
+var fh=function(s,largo){return new Date(s*1000).toLocaleString('es-AR',largo?{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}:{hour:'2-digit',minute:'2-digit',hour12:false})};
+var NS='http://www.w3.org/2000/svg';
+function el(n,a,txt){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);if(txt!=null)e.textContent=txt;$('svg').appendChild(e);return e}
+
+function dibujar(){
+  var lista=[];
+  ensayos.forEach(function(e){var p=puntos(e);if(p.length){e.p=p;e.ult=p[p.length-1][0];lista.push(e)}});
+  lista.sort(function(a,b){return b.ult-a.ult});
+  var sel=$('ens');sel.textContent='';
+  lista.forEach(function(e){var o=document.createElement('option');o.value=e.id;o.textContent='N.º '+e.n+' · '+fh(e.p[0][0],true);sel.appendChild(o)});
+  if(!lista.length){$('svg').textContent='';el('text',{x:20,y:40,fill:'#94a3b8','font-size':14},'Todavía no hay datos');return}
+  var e=lista.find(function(x){return x.id===elegido})||lista[0];
+  sel.value=e.id;pts=e.p;
+  var sp=+$('sp').value,tol=+$('tol').value;
+  var ok=pts.filter(function(p){return p[1]!==null});
+  var fin=pts[pts.length-1][0];
+  vis=pts.filter(function(p){return !horas||p[0]>=fin-horas*3600});
+  var v=vis.filter(function(p){return p[1]!==null});
+  if(ok.length){var u=ok[ok.length-1];$('act').textContent=f2(u[1])+' °C';$('hora').textContent=fh(u[0],true)}
+  $('svg').textContent='';esc=null;
+  if(!v.length)return;
+  var lo=Infinity,hi=-Infinity,su=0,de=0;
+  v.forEach(function(p){lo=Math.min(lo,p[1]);hi=Math.max(hi,p[1]);su+=p[1];if(Math.abs(p[1]-sp)<=tol)de++});
+  $('min').textContent=f2(lo)+' °C';$('max').textContent=f2(hi)+' °C';$('med').textContent=f2(su/v.length)+' °C';
+  $('den').textContent=(100*de/v.length).toFixed(1).replace('.',',')+' %';
+  tabla(v);
+
+  if($('svg').clientWidth<120)return;
+  var W=$('svg').clientWidth,H=380,L=48,R=14,T=10,B=30;
+  var x0=vis[0][0],x1=Math.max(fin,x0+60);
+  var a=lo,b=hi;
+  // Incluir la franja de tolerancia si está cerca de los datos
+  if(sp+tol>=lo-5&&sp-tol<=hi+5){a=Math.min(a,sp-tol);b=Math.max(b,sp+tol)}
+  var m=Math.max((b-a)*.06,.15);a-=m;b+=m;
+  var X=function(t){return L+(t-x0)/(x1-x0)*(W-L-R)},Y=function(q){return T+(b-q)/(b-a)*(H-T-B)};
+  el('clipPath',{id:'cp'});
+  var cr=document.createElementNS(NS,'rect');[['x',L],['y',T],['width',W-L-R],['height',H-T-B]].forEach(function(q){cr.setAttribute(q[0],q[1])});
+  $('svg').lastChild.appendChild(cr);
+  el('rect',{x:L,width:W-L-R,y:Y(sp+tol),height:Math.max(0,Y(sp-tol)-Y(sp+tol)),fill:'rgba(16,185,129,.13)','clip-path':'url(#cp)'});
+  var pa=[.1,.2,.5,1,2,5,10,20].find(function(q){return (b-a)/q<=7})||50;
+  for(var i=Math.ceil(a/pa);i*pa<=b;i++){
+    el('line',{x1:L,x2:W-R,y1:Y(i*pa),y2:Y(i*pa),stroke:'#1e293b'});
+    el('text',{x:L-7,y:Y(i*pa)+4,'text-anchor':'end',fill:'#94a3b8','font-size':12},(i*pa).toFixed(pa<1?1:0).replace('.',','));
+  }
+  if(sp>a&&sp<b)el('line',{x1:L,x2:W-R,y1:Y(sp),y2:Y(sp),stroke:'#10b981','stroke-dasharray':'5 4'});
+  var nt=Math.max(2,Math.floor((W-L-R)/80));
+  var pt=[60,300,600,900,1800,3600,7200,10800,21600,43200].find(function(q){return (x1-x0)/q<=nt})||86400;
+  var tz=new Date(x0*1000).getTimezoneOffset()*60;
+  for(var s=Math.ceil((x0-tz)/pt)*pt+tz;s<=x1;s+=pt)el('text',{x:X(s),y:H-9,'text-anchor':'middle',fill:'#94a3b8','font-size':12},fh(s));
+  var d='',ant=null;
+  vis.forEach(function(p){
+    if(p[1]===null){ant=null;return}
+    d+=(ant===null||p[0]-ant>60?'M':'L')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1);ant=p[0];
+  });
+  el('path',{d:d,fill:'none',stroke:'#3987e5','stroke-width':2,'stroke-linejoin':'round','clip-path':'url(#cp)'});
+  esc={X:X,Y:Y,v:v,H:H,T:T,B:B,W:W,x0:x0,x1:x1,L:L,R:R,
+    g:el('line',{stroke:'#64748b',visibility:'hidden'}),
+    c:el('circle',{r:5,fill:'#3987e5',stroke:'#121a2b','stroke-width':2,visibility:'hidden'})};
+}
+function tabla(v){
+  var g=new Map();
+  v.forEach(function(p){var h=Math.floor(p[0]/3600)*3600,o=g.get(h);if(!o)g.set(h,o={a:p[1],b:p[1],s:0,n:0});o.a=Math.min(o.a,p[1]);o.b=Math.max(o.b,p[1]);o.s+=p[1];o.n++});
+  var tb=$('tb');tb.textContent='';
+  g.forEach(function(o,h){var tr=document.createElement('tr');[fh(h,true).replace(/:00$/,''),f2(o.a),f2(o.s/o.n),f2(o.b),o.n].forEach(function(c){var td=document.createElement('td');td.textContent=c;tr.appendChild(td)});tb.appendChild(tr)});
+}
+$('svg').addEventListener('pointermove',function(ev){
+  if(!esc)return;
+  var r=$('svg').getBoundingClientRect(),t=esc.x0+(ev.clientX-r.left-esc.L)/(esc.W-esc.L-esc.R)*(esc.x1-esc.x0);
+  var lo=0,hi=esc.v.length-1;
+  while(lo<hi){var k=(lo+hi)>>1;if(esc.v[k][0]<t)lo=k+1;else hi=k}
+  if(lo>0&&t-esc.v[lo-1][0]<esc.v[lo][0]-t)lo--;
+  var p=esc.v[lo],x=esc.X(p[0]),y=esc.Y(p[1]);
+  [['x1',x],['x2',x],['y1',esc.T],['y2',esc.H-esc.B],['visibility','visible']].forEach(function(q){esc.g.setAttribute(q[0],q[1])});
+  [['cx',x],['cy',y],['visibility','visible']].forEach(function(q){esc.c.setAttribute(q[0],q[1])});
+  var tip=$('tip');tip.textContent=f2(p[1])+' °C · '+fh(p[0],true);tip.style.display='block';
+  tip.style.left=Math.min(x+24,esc.W-tip.offsetWidth)+'px';tip.style.top=Math.max(40,y)+'px';
+});
+$('svg').addEventListener('pointerleave',function(){$('tip').style.display='none';if(esc){esc.g.setAttribute('visibility','hidden');esc.c.setAttribute('visibility','hidden')}});
+
+// ---- Controles ----
+$('ens').onchange=function(){elegido=this.value;dibujar()};
+$('rangos').onclick=function(ev){var h=ev.target.dataset.h;if(h==null)return;horas=+h;this.querySelectorAll('button').forEach(function(b){b.classList.toggle('on',b===ev.target)});dibujar()};
+['sp','tol'].forEach(function(i){$(i).oninput=function(){localStorage.setItem(OPT,JSON.stringify({sp:+$('sp').value,tol:+$('tol').value}));dibujar()}});
+new ResizeObserver(pedir).observe($('graf'));
+$('csv').onclick=function(){
+  if(!pts.length)return;
+  var e=ensayos.get($('ens').value),t0=pts[0][0];
+  // Mismo formato que analizar.py
+  var s=pts.map(function(p){return [e.n,p[0],p[0]-t0,p[1]===null?'nan':p[1].toFixed(4)].join(',')}).join('\n')+'\n';
+  var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([s],{type:'text/csv'}));
+  a.download='estufa_ensayo'+e.n+'.csv';a.click();setTimeout(function(){URL.revokeObjectURL(a.href)},1000);
+};
+
+// ---- MQTT ----
+function conectar(c){
+  if(cliente)cliente.end(true);
+  if(typeof mqtt==='undefined'){$('con').textContent='No se pudo cargar la librería MQTT';return}
+  $('con').textContent='Conectando…';
+  cliente=mqtt.connect('wss://'+c.host+':'+c.port+'/mqtt',{username:c.user,password:c.pass,reconnectPeriod:5000});
+  cliente.on('connect',function(){$('con').textContent='MQTT conectado';cliente.subscribe(['estufa/hist/#','estufa/temperatura','estufa/estado'],{qos:1})});
+  cliente.on('close',function(){$('con').textContent='MQTT desconectado'});
+  cliente.on('error',function(e){$('con').textContent='Error MQTT: '+e.message});
+  cliente.on('message',function(t,m){
+    var s=m.toString();
+    if(t==='estufa/estado'){$('esp').textContent='ESP32: '+(s==='online'?'en línea':'sin conexión');return}
+    try{var d=JSON.parse(s);if(t==='estufa/temperatura')vivo(d);else bloque(d)}catch(e){console.error('Mensaje inválido',t)}
+  });
+}
+function abrir(){var c=lee(KEY)||{};$('chost').value=c.host||'';$('cport').value=c.port||8884;$('cuser').value=c.user||'';$('cpass').value=c.pass||'';$('cfg').style.display='flex'}
+$('bcfg').onclick=abrir;$('ccanc').onclick=function(){$('cfg').style.display='none'};
+$('cfg').firstElementChild.onsubmit=function(ev){
+  ev.preventDefault();
+  var c={host:$('chost').value.trim().replace(/^\w+:\/\//,'').replace(/[:\/].*$/,''),port:+$('cport').value,user:$('cuser').value.trim(),pass:$('cpass').value};
+  localStorage.setItem(KEY,JSON.stringify(c));$('cfg').style.display='none';conectar(c);
+};
+if(location.search==='?demo'){
+  $('demo').hidden=false;
+  var t0=Math.floor(Date.now()/1000)-18*3600;
+  for(var b=0;b<18;b++){var arr=[];for(var i=0;i<360;i++){var s=(b*360+i)*10;arr.push(b===9&&i>100&&i<200?null:Math.round(100*(22+15*(1-Math.exp(-s/1500))+.5*Math.sin(s/115))))}bloque({id:'demo',ensayo:1,bloque:b,epoch0:t0+b*3600,p:10,t:arr})}
+  vivo({id:'demo',ensayo:1,epoch:t0+18*3600,t:37.25});
+}else{var c0=lee(KEY);dibujar();if(c0&&c0.host)conectar(c0);else abrir()}
+})();
+</script>
+</body>
+</html>

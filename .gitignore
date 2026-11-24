@@ -1,0 +1,6 @@
+.pio/
+.vscode/
+include/secrets.h
+python/credenciales.ini
+datos/
+__pycache__/
