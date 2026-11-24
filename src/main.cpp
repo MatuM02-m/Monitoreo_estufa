@@ -59,6 +59,32 @@ uint32_t epochDe(uint32_t s) {
   return (uint32_t)ahora - (segundos() - s);
 }
 
+const char* causaReset() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "encendido/EN";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "panic";
+    case ESP_RST_INT_WDT: return "wdt_int";
+    case ESP_RST_TASK_WDT: return "wdt_tarea";
+    case ESP_RST_WDT: return "wdt_otro";
+    case ESP_RST_BROWNOUT: return "baja_tension";
+    default: return "otra";
+  }
+}
+
+// Diagnóstico retenido: estufa/diag/<ensayo % 8>
+void publicarDiag() {
+  char json[230], topico[32];
+  snprintf(json, sizeof(json),
+           "{\"ensayo\":%d,\"reset\":\"%s\",\"codigo\":%d,\"s\":%u,\"rssi\":%d,"
+           "\"heap\":%u,\"heap_min\":%u,\"pila_red\":%u,\"epoch\":%u}",
+           ensayo, causaReset(), (int)esp_reset_reason(), (unsigned)segundos(),
+           WiFi.RSSI(), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
+           (unsigned)uxTaskGetStackHighWaterMark(nullptr), (unsigned)epochDe(segundos()));
+  snprintf(topico, sizeof(topico), "estufa/diag/%d", ensayo % 8);
+  mqtt.publish(topico, json, true);
+}
+
 // Devuelve false si falló la publicación
 bool publicarBloque(int b, int n) {
   static char json[2300];
@@ -102,7 +128,7 @@ void tareaRed(void*) {
   mqtt.setKeepAlive(30);
   char id[32];
   snprintf(id, sizeof(id), "estufa-%012llx", ESP.getEfuseMac());
-  uint32_t ultimo = 0;
+  uint32_t ultimo = 0, ultimoDiag = 0;
   bool primero = true;
 
   for (;;) {
@@ -114,6 +140,8 @@ void tareaRed(void*) {
       if (ok) {
         mqtt.publish(TOPICO_ESTADO, "online", true);
         memset(publicado, 0, sizeof(publicado));   // reenviar todo
+        publicarDiag();
+        ultimoDiag = millis();
         Serial.println("# MQTT conectado");
       } else {
         char err[100] = "";
@@ -134,6 +162,10 @@ void tareaRed(void*) {
         xQueueReceive(cola, &m, 0);
       }
       publicarHistorial(publicado);
+      if (millis() - ultimoDiag > 60000) {
+        ultimoDiag = millis();
+        publicarDiag();
+      }
     }
     vTaskDelay(pdMS_TO_TICKS(50));
   }
@@ -180,9 +212,11 @@ void setup() {
     if (!LittleFS.exists(archivo)) { ensayo = i; break; }
   }
   File f = LittleFS.open(archivo, "a");
-  if (f) f.close();
-  Serial.printf("# Ensayo %d, reset=%d, flash libre=%u kB\n", ensayo,
-                (int)esp_reset_reason(),
+  if (f) {
+    f.printf("# ensayo %d reset=%s (%d)\n", ensayo, causaReset(), (int)esp_reset_reason());
+    f.close();
+  }
+  Serial.printf("# Ensayo %d, reset=%s, flash libre=%u kB\n", ensayo, causaReset(),
                 (unsigned)((LittleFS.totalBytes() - LittleFS.usedBytes()) / 1024));
 
   sensor.begin();
@@ -210,7 +244,8 @@ void setup() {
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 #endif
   configTime(0, 0, "pool.ntp.org", "time.google.com");
-  xTaskCreatePinnedToCore(tareaRed, "red", 12288, nullptr, 1, nullptr, 0);
+  // Núcleo 1: PubSubClient espera sin ceder CPU y en el 0 dispara el watchdog
+  xTaskCreatePinnedToCore(tareaRed, "red", 12288, nullptr, 1, nullptr, 1);
 }
 
 void loop() {

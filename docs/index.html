@@ -203,11 +203,14 @@ $('csv').onclick=function(){
 function conectar(c){
   if(cliente)cliente.end(true);
   if(typeof mqtt==='undefined'){$('con').textContent='No se pudo cargar la librería MQTT';return}
+  if(+c.port===8883||!c.port)c.port=8884; // 8883 es MQTT, no WebSocket
   $('con').textContent='Conectando…';
-  cliente=mqtt.connect('wss://'+c.host+':'+c.port+'/mqtt',{username:c.user,password:c.pass,reconnectPeriod:5000});
-  cliente.on('connect',function(){$('con').textContent='MQTT conectado';cliente.subscribe(['estufa/hist/#','estufa/temperatura','estufa/estado'],{qos:1})});
-  cliente.on('close',function(){$('con').textContent='MQTT desconectado'});
-  cliente.on('error',function(e){$('con').textContent='Error MQTT: '+e.message});
+  try{cliente=mqtt.connect('wss://'+c.host+':'+c.port+'/mqtt',{username:c.user,password:c.pass,reconnectPeriod:5000,connectTimeout:12000});}catch(e){$('con').textContent='Host o puerto inválido';return}
+  cliente.on('connect',function(){err='';$('con').textContent='MQTT conectado';cliente.subscribe(['estufa/hist/#','estufa/temperatura','estufa/estado'],{qos:1})});
+  var err='';
+  cliente.on('reconnect',function(){$('con').textContent=(err||'Sin respuesta: revisar host y puerto (8884)')+' · reintentando…'});
+  cliente.on('error',function(e){err=/authoriz|password|username/i.test(e.message)?'Usuario o contraseña rechazados':'Error MQTT: '+e.message;$('con').textContent=err});
+  cliente.on('close',function(){$('con').textContent=err||'MQTT desconectado'});
   cliente.on('message',function(t,m){
     var s=m.toString();
     if(t==='estufa/estado'){$('esp').textContent='ESP32: '+(s==='online'?'en línea':'sin conexión');return}
